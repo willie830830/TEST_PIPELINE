@@ -29,4 +29,83 @@ jobs:
         id: token
         run: |
           if [ -n "${{ secrets.ORG_TOKEN }}" ]; then
-            echo "token=${{ secrets.ORG_TOK_
+            echo "token=${{ secrets.ORG_TOKEN }}" >> $GITHUB_OUTPUT
+            echo "auth=PAT" >> $GITHUB_OUTPUT
+          else
+            echo "token=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_OUTPUT
+            echo "auth=GITHUB_TOKEN" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Ensure jq & gh
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          gh --version || true
+
+      - name: List repositories via GitHub API (handles pagination)
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          case "${VISIBILITY}" in
+            all) TYPE="all" ;;
+            public) TYPE="public" ;;
+            private) TYPE="private" ;;
+            internal) TYPE="all" ;; # enterprise 才有 internal，先抓 all 再過濾
+          esac
+
+          tmpfile=$(mktemp)
+          page=1
+          per_page=100
+          echo "[]" > "$tmpfile"
+
+          while : ; do
+            resp=$(gh api -H "Accept: application/vnd.github+json" \
+                    "/orgs/${ORG}/repos" \
+                    --method GET \
+                    -F per_page="$per_page" \
+                    -F page="$page" \
+                    -F type="$TYPE" 2>/dev/null || true)
+
+            if [ -z "$resp" ] || [ "$(echo "$resp" | jq 'length')" -eq 0 ]; then
+              break
+            fi
+
+            jq -s '.[0] + .[1]' "$tmpfile" <(echo "$resp") > "${tmpfile}.new"
+            mv "${tmpfile}.new" "$tmpfile"
+            page=$((page+1))
+          done
+
+          if [ "${VISIBILITY}" = "internal" ]; then
+            jq 'map(select(.visibility=="internal"))' "$tmpfile" > repos.json
+          else
+            cp "$tmpfile" repos.json
+          fi
+
+          jq '[ .[] | {name, full_name, private, visibility, default_branch, archived, fork, html_url, language, updated_at} ]' repos.json > repos_min.json
+
+          echo "count=$(jq 'length' repos.json)" >> $GITHUB_OUTPUT
+          echo "json=$(cat repos_min.json | jq -c .)" >> $GITHUB_OUTPUT
+
+      - name: Upload artifacts (full & minimal JSON)
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-repos-${{ inputs.org }}
+          path: |
+            repos.json
+            repos_min.json
+
+      - name: Write summary
+        run: |
+          echo "### Repository list for \`${{ inputs.org }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Auth mode: \`${{ steps.token.outputs.auth }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Total: **${{ steps.list.outputs.count }}**" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Preview (top 20)</summary>" >> $GITHUB_STEP_SUMMARY
+          jq -r '.[0:20] | map("- " + .full_name + " (" + (if .private then "private" else "public" end) + ")") | join("\n")' repos_min.json >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+    outputs:
+      repos_json: ${{ steps.list.outputs.json }}
+      repo_count: ${{ steps.list.outputs.count }}
