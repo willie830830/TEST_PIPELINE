@@ -16,8 +16,7 @@ on:
 
 permissions:
   contents: read
-  # 若用 GITHUB_TOKEN 嘗試列 org repos，至少需要 metadata:read
-  metadata: read
+  actions: write
 
 jobs:
   list-repos:
@@ -30,100 +29,4 @@ jobs:
         id: token
         run: |
           if [ -n "${{ secrets.ORG_TOKEN }}" ]; then
-            echo "token=${{ secrets.ORG_TOKEN }}" >> $GITHUB_OUTPUT
-            echo "auth=PAT" >> $GITHUB_OUTPUT
-          else
-            echo "token=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_OUTPUT
-            echo "auth=GITHUB_TOKEN" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Install jq & gh
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-          # gh 已預裝在 ubuntu-latest，但保險起見顯示版本
-          gh --version || true
-
-      - name: List repositories via GitHub API (handles pagination)
-        id: list
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          # 構造查詢參數
-          # /orgs/{org}/repos 支援 type=all|public|private|forks|sources|member
-          # 不支援直接 visibility=private，但可用 type 搭配權限達到目的。
-          # 這裡用 visibility 轉成 type 的常用對應：
-          case "${VISIBILITY}" in
-            all) TYPE="all" ;;
-            public) TYPE="public" ;;
-            private) TYPE="private" ;;
-            internal) TYPE="all" ;; # internal 僅 Enterprise，這裡先抓 all 再 client-side 過濾
-          esac
-
-          tmpfile=$(mktemp)
-          page=1
-          per_page=100
-          echo "[]" > "$tmpfile"
-
-          while : ; do
-            resp=$(gh api -H "Accept: application/vnd.github+json" \
-                    "/orgs/${ORG}/repos" \
-                    -q . \
-                    --method GET \
-                    -F per_page="$per_page" \
-                    -F page="$page" \
-                    -F type="$TYPE" 2>/dev/null || true)
-
-            # 若呼叫失敗或回空陣列就結束
-            if [ -z "$resp" ] || [ "$(echo "$resp" | jq 'length')" -eq 0 ]; then
-              break
-            fi
-
-            # 累加
-            jq -s '.[0] + .[1]' "$tmpfile" <(echo "$resp") > "${tmpfile}.new"
-            mv "${tmpfile}.new" "$tmpfile"
-
-            # 下一頁
-            page=$((page+1))
-          done
-
-          # 若使用者選 internal，在 Enterprise 組織可用 .visibility == "internal" 篩一次
-          if [ "${VISIBILITY}" = "internal" ]; then
-            jq '. | map(select(.visibility=="internal"))' "$tmpfile" > repos.json
-          else
-            cp "$tmpfile" repos.json
-          fi
-
-          count=$(jq 'length' repos.json)
-          echo "Found $count repositories."
-          echo "count=$count" >> $GITHUB_OUTPUT
-
-          # 產生只含必要欄位的精簡版
-          jq '[ .[] | {name, full_name, private, visibility, default_branch, archived, fork, html_url, language, updated_at} ]' repos.json > repos_min.json
-
-          # 輸出給後續工作使用
-          echo "json=$(cat repos_min.json | jq -c .)" >> $GITHUB_OUTPUT
-
-      - name: Upload artifacts (full & minimal JSON)
-        uses: actions/upload-artifact@v4
-        with:
-          name: org-repos-${{ inputs.org }}
-          path: |
-            repos.json
-            repos_min.json
-
-      - name: Write summary
-        run: |
-          echo "### Repository list for \`${{ inputs.org }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Auth mode: \`${{ steps.token.outputs.auth }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Total: **${{ steps.list.outputs.count }}**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "<details><summary>Preview (top 20)</summary>" >> $GITHUB_STEP_SUMMARY
-          jq -r '.[0:20] | map("- " + .full_name + " (" + (if .private then "private" else "public" end) + ")") | join("\n")' repos_min.json >> $GITHUB_STEP_SUMMARY
-          echo "</details>" >> $GITHUB_STEP_SUMMARY
-
-    outputs:
-      repos_json: ${{ steps.list.outputs.json }}
-      repo_count: ${{ steps.list.outputs.count }}
+            echo "token=${{ secrets.ORG_TOK_
