@@ -1,50 +1,42 @@
-name: List Org Repos (Simple)
+name: List Org Repos (simple, no expressions)
 
 on:
   workflow_dispatch:
-    inputs:
-      org:
-        description: "GitHub Organization (e.g. your-org)"
-        required: true
-        type: string
-
-permissions:
-  contents: read
 
 jobs:
   list:
     runs-on: ubuntu-latest
-    env:
-      ORG: ${{ inputs.org }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # PAT，含 read:org + repo
     steps:
-      - name: Check token
-        run: |
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "ERROR: Please add a PAT secret named ORG_TOKEN with scopes: read:org, repo" >&2
-            exit 1
-          fi
-
-      - name: Ensure jq & gh
+      - name: Install jq and gh
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq gh
-          gh --version
+
+      - name: Determine organization (from this repo's owner)
+        run: |
+          ORG="${GITHUB_REPOSITORY%/*}"
+          echo "ORG=$ORG" >> $GITHUB_ENV
+          echo "Using org: $ORG"
+
+      - name: Authenticate gh
+        run: |
+          set -e
+          TOKEN="${ORG_TOKEN:-$GITHUB_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "No token found in ORG_TOKEN or GITHUB_TOKEN." >&2
+            exit 1
+          fi
+          echo "$TOKEN" | gh auth login --with-token
 
       - name: List repos (name + url)
         run: |
-          # 抓全 org（含私有，取決於 PAT 權限）
-          gh repo list "$ORG" --limit 1000 --json name,url \
-            | jq -r '.[] | {name, url}' > repos.json
-
-          # 產生 CSV（含表頭）
+          set -e
+          gh repo list "$ORG" --limit 1000 --json name,url,visibility,private > repos.json
           jq -r '["name","url"], (.[] | [.name, .url]) | @csv' repos.json > repos.csv
-
-          # 顯示統計與前幾筆預覽到摘要
           COUNT=$(jq 'length' repos.json)
           {
-            echo "### Repositories in \`$ORG\`"
-            echo "- Total: **$COUNT**"
+            echo "### Repos in $ORG"
+            echo "- Total: $COUNT"
             echo
             echo "<details><summary>Preview (first 20)</summary>"
             head -n 21 repos.csv | sed 's/^/- /'
