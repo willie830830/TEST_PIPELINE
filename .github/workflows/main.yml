@@ -1,42 +1,28 @@
-name: List Org Repositories
+name: List Org Repos (Simple)
 
 on:
   workflow_dispatch:
     inputs:
       org:
-        description: "Organization name (e.g. your-org)"
+        description: "GitHub Organization (e.g. your-org)"
         required: true
         type: string
-      visibility:
-        description: "Filter by visibility"
-        required: false
-        default: "all"
-        type: choice
-        options: [all, public, private, internal]
 
 permissions:
   contents: read
 
 jobs:
-  list-repos:
+  list:
     runs-on: ubuntu-latest
     env:
       ORG: ${{ inputs.org }}
-      VISIBILITY: ${{ inputs.visibility }}
-
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # PAT，含 read:org + repo
     steps:
-      - name: Decide auth token (prefer PAT)
-        id: token
-        env:
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
-          GH_TKN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check token
         run: |
-          if [ -n "${ORG_TOKEN}" ]; then
-            echo "token=${ORG_TOKEN}" >> "$GITHUB_OUTPUT"
-            echo "auth=PAT" >> "$GITHUB_OUTPUT"
-          else
-            echo "token=${GH_TKN}" >> "$GITHUB_OUTPUT"
-            echo "auth=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "ERROR: Please add a PAT secret named ORG_TOKEN with scopes: read:org, repo" >&2
+            exit 1
           fi
 
       - name: Ensure jq & gh
@@ -45,80 +31,28 @@ jobs:
           sudo apt-get install -y jq gh
           gh --version
 
-      - name: List repositories via GitHub API (handles pagination)
-        id: list
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          ORG: ${{ env.ORG }}
-          VISIBILITY: ${{ env.VISIBILITY }}
+      - name: List repos (name + url)
         run: |
-          set -euo pipefail
+          # 抓全 org（含私有，取決於 PAT 權限）
+          gh repo list "$ORG" --limit 1000 --json name,url \
+            | jq -r '.[] | {name, url}' > repos.json
 
-          case "${VISIBILITY}" in
-            all) TYPE="all" ;;
-            public) TYPE="public" ;;
-            private) TYPE="private" ;;
-            internal) TYPE="all" ;;
-            *) TYPE="all" ;;
-          esac
+          # 產生 CSV（含表頭）
+          jq -r '["name","url"], (.[] | [.name, .url]) | @csv' repos.json > repos.csv
 
-          tmpfile="$(mktemp)"
-          page=1
-          per_page=100
-          echo "[]" > "$tmpfile"
-
-          while : ; do
-            resp="$(gh api -H 'Accept: application/vnd.github+json' \
-                      "/orgs/${ORG}/repos" \
-                      --method GET \
-                      -F per_page="${per_page}" \
-                      -F page="${page}" \
-                      -F type="${TYPE}" || true)"
-
-            if [ -z "$resp" ] || [ "$(echo "$resp" | jq 'length')" -eq 0 ]; then
-              break
-            fi
-
-            jq -s '.[0] + .[1]' "$tmpfile" <(echo "$resp") > "${tmpfile}.new"
-            mv "${tmpfile}.new" "$tmpfile"
-            page=$((page+1))
-          done
-
-          if [ "${VISIBILITY}" = "internal" ]; then
-            jq 'map(select(.visibility=="internal"))' "$tmpfile" > repos.json
-          else
-            cp "$tmpfile" repos.json
-          fi
-
-          jq '[ .[] | {name, full_name, private, visibility, default_branch, archived, fork, html_url, language, updated_at} ]' repos.json > repos_min.json
-
-          echo "count=$(jq 'length' repos.json)" >> "$GITHUB_OUTPUT"
-          echo "json=$(jq -c . repos_min.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifacts (full & minimal JSON)
-        uses: actions/upload-artifact@v4
-        with:
-          name: org-repos-${{ inputs.org }}
-          path: |
-            repos.json
-            repos_min.json
-
-      - name: Write summary
-        env:
-          ORG_INPUT: ${{ inputs.org }}
-          AUTH_MODE: ${{ steps.token.outputs.auth }}
-          COUNT: ${{ steps.list.outputs.count }}
-        run: |
+          # 顯示統計與前幾筆預覽到摘要
+          COUNT=$(jq 'length' repos.json)
           {
-            echo "### Repository list for \`${ORG_INPUT}\`"
-            echo "- Auth mode: \`${AUTH_MODE}\`"
-            echo "- Total: **${COUNT}**"
+            echo "### Repositories in \`$ORG\`"
+            echo "- Total: **$COUNT**"
             echo
-            echo "<details><summary>Preview (top 20)</summary>"
-            jq -r '.[0:20] | map("- " + .full_name + " (" + (if .private then "private" else "public" end) + ")") | join("\n")' repos_min.json
+            echo "<details><summary>Preview (first 20)</summary>"
+            head -n 21 repos.csv | sed 's/^/- /'
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
-    outputs:
-      repos_json: ${{ steps.list.outputs.json }}
-      repo_count: ${{ steps.list.outputs.count }}
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: org-repos
+          path: repos.csv
